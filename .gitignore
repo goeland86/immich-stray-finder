@@ -1,0 +1,20 @@
+# Binary
+immich-stray-finder
+immich-stray-finder.exe
+immich-stray-finder_linux
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# Output
+immich-orphans/
