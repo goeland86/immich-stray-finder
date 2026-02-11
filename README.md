@@ -111,9 +111,9 @@ immich-stray-finder [flags]
 
 The tool automatically handles the path translation between Immich's Docker-internal paths and the host filesystem:
 
-- Immich API returns paths like `/data/library/Jon/2024/01/photo.jpg`
-- The `--path-prefix` (default `/data/`) is stripped, giving `library/Jon/2024/01/photo.jpg`
-- The scanner produces relative paths like `library/Jon/2024/01/photo.jpg` from `--library-path`
+- Immich API returns paths like `/data/library/username/2024/01/photo.jpg`
+- The `--path-prefix` (default `/data/`) is stripped, giving `library/username/2024/01/photo.jpg`
+- The scanner produces relative paths like `library/username/2024/01/photo.jpg` from `--library-path`
 - These match, so the file is tracked
 
 ## Running Tests
@@ -124,6 +124,10 @@ go test ./...
 
 There are unit tests across all packages covering the HTTP client (with mock servers), filesystem scanner (including directory exclusion), matching algorithm, and file mover (both dry-run and actual moves).
 
+## AI-Generated Code
+
+This project was generated with the assistance of [Claude Code](https://claude.ai/claude-code) (Anthropic's Claude Opus 4.6). The code, tests, documentation, and session logs were produced through an interactive conversation with the AI, guided and reviewed by a human developer.
+
 ## License
 
-MIT
+AGPL-3.0 -- see [LICENSE](LICENSE) for details.

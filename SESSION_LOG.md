@@ -4,7 +4,7 @@
 
 ### Goal
 
-Build a standalone Go tool (`immich-stray-finder`) that identifies and relocates orphan files in an Immich photo library where the only difference between the orphan and the tracked asset is file extension case (e.g., `photo.JPG` on disk vs `photo.jpg` tracked by Immich).
+Build a standalone Go tool that identifies and relocates orphan files in an Immich photo library where the only difference between the orphan and the tracked asset is file extension case (e.g., `photo.JPG` on disk vs `photo.jpg` tracked by Immich).
 
 ### Architectural Decision
 
@@ -20,15 +20,15 @@ immich-stray-finder/
   main.go                 # CLI flags, orchestration, signal handling, slog logging
   .gitignore
   immich/
-    types.go              # SearchMetadataRequest/Response, Asset struct
-    client.go             # HTTP client: POST /api/search/metadata with pagination
+    types.go              # API request/response structs (Search, Asset, User)
+    client.go             # HTTP client: pagination, current user lookup
     client_test.go        # 4 tests (single page, multi-page, API error, context cancel)
   scanner/
-    scanner.go            # filepath.WalkDir, forward-slash normalized relative paths
-    scanner_test.go       # 4 tests (normal scan, empty dir, cancel, prefix)
+    scanner.go            # filepath.WalkDir with directory exclusions
+    scanner_test.go       # 5 tests (normal scan, empty dir, cancel, prefix, exclusions)
   matcher/
-    matcher.go            # Core: find orphans whose extension case-variant IS tracked
-    matcher_test.go       # 6 tests (basic, no orphans, unrelated, no ext, mixed, variants)
+    matcher.go            # Core: find files on disk not tracked by Immich
+    matcher_test.go       # 4 tests (all tracked, mixed, none tracked, empty inputs)
   mover/
     mover.go              # Move files with dry-run default, cross-device fallback
     mover_test.go         # 4 tests (dry-run, actual move, dir structure, multiple files)
@@ -36,7 +36,7 @@ immich-stray-finder/
 
 ### Implementation Steps
 
-1. **Initialized Go module** (`go mod init github.com/goeland86/immich-stray-finder`)
+1. **Initialized Go module**
 2. **Created `immich/types.go`** -- API request/response structs matching Immich's `/api/search/metadata` endpoint
 3. **Created `immich/client.go`** -- HTTP client that paginates through all assets and collects `originalPath` values into a `map[string]struct{}` for O(1) lookup
 4. **Created `scanner/scanner.go`** -- Walks the library directory with `filepath.WalkDir`, returns relative paths normalized to forward slashes to match Immich's path format
@@ -64,7 +64,7 @@ The real Immich API returns `nextPage` as a JSON string (e.g., `"2"`) or `null`,
 #### Dry-Run Results
 
 Ran against a production Immich instance:
-- **63,589 assets** fetched from Immich across 64 pages (~10 seconds)
+- **63,589 assets** fetched across 64 pages (~10 seconds)
 - **722,471 files** scanned on disk (~5 seconds)
 - **0 orphans found** -- the library had no extension-case duplicate files
 
@@ -114,13 +114,13 @@ Added automatic exclusion of these top-level directories during `filepath.WalkDi
 
 #### 5. Path prefix stripping (`main.go`)
 
-After excluding internal dirs, all 219,834 remaining files still showed as untracked. Root cause: Immich API returns Docker-internal absolute paths (e.g., `/data/library/UserName/2024/photo.jpg`) while the scanner produces paths relative to `--library-path` (e.g., `library/UserName/2024/photo.jpg`).
+After excluding internal dirs, all 219,834 remaining files still showed as untracked. Root cause: Immich API returns Docker-internal absolute paths (e.g., `/data/library/username/2024/photo.jpg`) while the scanner produces paths relative to `--library-path` (e.g., `library/username/2024/photo.jpg`).
 
-Added `--path-prefix` flag (default `/data/`) that strips the Docker mount prefix from API paths before comparison. This brought matches from 0 to 63,556 out of 63,589 assets.
+Added `--path-prefix` flag (default `/data/`) that strips the Docker mount prefix from API paths before comparison.
 
 #### 6. User-scoped library scanning (`immich/client.go`, `immich/types.go`, `main.go`)
 
-After path prefix fix, 156,278 files were still untracked because the scanner walked the entire library root including other users' directories and `upload/` trees.
+After path prefix fix, many files were still untracked because the scanner walked the entire library root including other users' directories and `upload/` trees.
 
 - Added `User` struct to `immich/types.go` with `StorageLabel` field
 - Added `FetchCurrentUser()` method to `immich/client.go` calling `GET /api/users/me`
@@ -139,3 +139,49 @@ After all fixes, dry-run against production Immich:
 - `go test ./...` -- all tests pass
 - `go vet ./...` -- no issues
 - Live dry-run -- correctly identifies untracked files scoped to the authenticated user
+
+---
+
+## Session 3 - Rename, Cleanup, and Release
+
+### Goal
+
+Rename the project from `immich_dupe_detector` to `immich-stray-finder` to better reflect its expanded scope, clean up history, and publish an initial release.
+
+### Changes Made
+
+#### 1. Project rename
+
+- Renamed Go module from `github.com/goeland86/immich_dupe_detector` to `github.com/goeland86/immich-stray-finder`
+- Updated all import paths in `main.go`
+- Updated `.gitignore` binary entries
+- Updated all references in `README.md` and `SESSION_LOG.md`
+- Renamed GitHub repository via `gh repo rename`
+- Updated local git remote URL
+
+#### 2. README rewrite
+
+Rewrote `README.md` to reflect current functionality:
+- Describes general untracked file detection (not just extension-case duplicates)
+- Documents `--path-prefix` flag
+- Documents automatic user detection and library scoping
+- Documents excluded Immich-internal directories
+- Added cross-compilation instructions
+
+#### 3. Git history squash
+
+Squashed all 4 commits into a single initial commit using an orphan branch approach (required because the root commit has no parent to soft-reset to).
+
+#### 4. Initial release (v1.0.0)
+
+Built binaries for three platforms and published as a GitHub release:
+- `immich-stray-finder_linux_amd64` -- Linux x86-64
+- `immich-stray-finder_linux_arm64` -- Linux ARM64
+- `immich-stray-finder_windows_amd64.exe` -- Windows x86-64
+
+### Verification
+
+- `go test ./...` -- all tests pass
+- `go vet ./...` -- no issues
+- All three binaries verified with `file` command
+- Release published at v1.0.0 with all artifacts
