@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -52,56 +53,130 @@ func main() {
 }
 
 func run(ctx context.Context, logger *slog.Logger, immichURL, apiKey, libraryPath, pathPrefix, targetDir string, doMove bool) error {
-	// Step 1: Identify the current user and fetch all asset paths from Immich.
 	client := immich.NewClient(immichURL, apiKey, logger)
 
-	user, err := client.FetchCurrentUser(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch current user: %w", err)
-	}
-	if user.StorageLabel == "" {
-		return fmt.Errorf("user %q has no storage label set in Immich", user.Name)
+	// Step 1: Detect admin mode by trying the admin users endpoint.
+	adminMode := false
+	var userIDs []string
+	var allUserIDs map[string]struct{}
+
+	users, err := client.FetchAllUsers(ctx)
+	if err == nil {
+		// Admin mode: we have the full user list.
+		adminMode = true
+		allUserIDs = make(map[string]struct{}, len(users))
+		userIDs = make([]string, len(users))
+		for i, u := range users {
+			userIDs[i] = u.ID
+			allUserIDs[u.ID] = struct{}{}
+			logger.Info("discovered user", "name", u.Name, "id", u.ID, "storage_label", u.StorageLabel)
+		}
+		logger.Info("admin mode activated", "user_count", len(users))
+	} else if errors.Is(err, immich.ErrNotAdmin) {
+		// Single-user fallback.
+		logger.Info("not an admin API key, falling back to single-user mode")
+	} else {
+		return fmt.Errorf("check admin status: %w", err)
 	}
 
-	logger.Info("fetching asset paths from Immich", "url", immichURL)
-	rawPaths, err := client.FetchAllAssetPaths(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch assets: %w", err)
+	// Step 2: Fetch assets.
+	var result *immich.AllAssetsResult
+	if adminMode {
+		logger.Info("fetching assets for all users", "url", immichURL)
+		result, err = client.FetchAllAssets(ctx, userIDs)
+		if err != nil {
+			return fmt.Errorf("fetch assets: %w", err)
+		}
+		// Merge user IDs from the admin user list (in case some users have no assets).
+		for uid := range allUserIDs {
+			result.UserIDs[uid] = struct{}{}
+		}
+	} else {
+		// Single-user mode: identify the current user.
+		user, err := client.FetchCurrentUser(ctx)
+		if err != nil {
+			return fmt.Errorf("fetch current user: %w", err)
+		}
+		if user.StorageLabel == "" {
+			return fmt.Errorf("user %q has no storage label set in Immich", user.Name)
+		}
+
+		logger.Info("fetching asset paths from Immich", "url", immichURL)
+		result, err = client.FetchAllAssets(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("fetch assets: %w", err)
+		}
+		// Add the current user's ID.
+		result.UserIDs[user.ID] = struct{}{}
+
+		// In single-user mode, we only scan the user's library directory.
+		userLibrary := filepath.Join(libraryPath, "library", user.StorageLabel)
+		logger.Info("scanning filesystem (single-user mode)", "path", userLibrary, "user", user.StorageLabel)
+		rawFiles, err := scanner.ScanFiles(ctx, userLibrary, logger)
+		if err != nil {
+			return fmt.Errorf("scan filesystem: %w", err)
+		}
+
+		// Prepend "library/{storageLabel}/" so paths match the normalized API paths.
+		diskPrefix := "library/" + user.StorageLabel + "/"
+		diskFiles := make([]string, len(rawFiles))
+		for i, f := range rawFiles {
+			diskFiles[i] = diskPrefix + f
+		}
+
+		// Strip the path prefix from asset paths.
+		strippedPaths := make(map[string]struct{}, len(result.AssetPaths))
+		for p := range result.AssetPaths {
+			strippedPaths[strings.TrimPrefix(p, pathPrefix)] = struct{}{}
+		}
+		result.AssetPaths = strippedPaths
+		logger.Info("normalized asset paths", "prefix_stripped", pathPrefix, "count", len(result.AssetPaths))
+
+		// Build match context and find untracked files.
+		mctx := &matcher.MatchContext{
+			AssetPaths: result.AssetPaths,
+			AssetIDs:   result.AssetIDs,
+			UserIDs:    result.UserIDs,
+		}
+
+		logger.Info("matching files against Immich database")
+		untracked := matcher.FindUntracked(diskFiles, mctx, logger)
+		return reportAndMove(untracked, libraryPath, targetDir, doMove, logger)
 	}
 
-	// Strip the Docker-internal path prefix so API paths become relative to
-	// library-path, matching the scanner output.
-	assetPaths := make(map[string]struct{}, len(rawPaths))
-	for p := range rawPaths {
-		assetPaths[strings.TrimPrefix(p, pathPrefix)] = struct{}{}
+	// Admin mode: scan the entire library-path root.
+	// Strip the path prefix from asset paths.
+	strippedPaths := make(map[string]struct{}, len(result.AssetPaths))
+	for p := range result.AssetPaths {
+		strippedPaths[strings.TrimPrefix(p, pathPrefix)] = struct{}{}
 	}
-	logger.Info("normalized asset paths", "prefix_stripped", pathPrefix, "count", len(assetPaths))
+	result.AssetPaths = strippedPaths
+	logger.Info("normalized asset paths", "prefix_stripped", pathPrefix, "count", len(result.AssetPaths))
 
-	// Step 2: Scan only the current user's library directory.
-	userLibrary := filepath.Join(libraryPath, "library", user.StorageLabel)
-	logger.Info("scanning filesystem", "path", userLibrary, "user", user.StorageLabel)
-	rawFiles, err := scanner.ScanFiles(ctx, userLibrary, logger)
+	logger.Info("scanning filesystem (admin mode)", "path", libraryPath)
+	diskFiles, err := scanner.ScanFiles(ctx, libraryPath, logger)
 	if err != nil {
 		return fmt.Errorf("scan filesystem: %w", err)
 	}
 
-	// Prepend "library/{storageLabel}/" so paths match the normalized API paths.
-	diskPrefix := "library/" + user.StorageLabel + "/"
-	diskFiles := make([]string, len(rawFiles))
-	for i, f := range rawFiles {
-		diskFiles[i] = diskPrefix + f
+	// Build match context.
+	mctx := &matcher.MatchContext{
+		AssetPaths: result.AssetPaths,
+		AssetIDs:   result.AssetIDs,
+		UserIDs:    result.UserIDs,
 	}
 
-	// Step 3: Find untracked files.
 	logger.Info("matching files against Immich database")
-	untracked := matcher.FindUntracked(diskFiles, assetPaths, logger)
+	untracked := matcher.FindUntracked(diskFiles, mctx, logger)
+	return reportAndMove(untracked, libraryPath, targetDir, doMove, logger)
+}
 
+func reportAndMove(untracked []matcher.UntrackedFile, libraryPath, targetDir string, doMove bool, logger *slog.Logger) error {
 	if len(untracked) == 0 {
 		logger.Info("no untracked files found")
 		return nil
 	}
 
-	// Step 4: Report or move.
 	fmt.Fprintf(os.Stderr, "\nFound %d untracked file(s):\n", len(untracked))
 	for _, u := range untracked {
 		fmt.Fprintf(os.Stderr, "  %s\n", u.RelPath)

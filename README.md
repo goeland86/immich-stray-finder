@@ -2,13 +2,14 @@
 
 A standalone tool that finds and relocates **untracked files** in an [Immich](https://immich.app/) photo library -- files that exist on disk but are not linked in the Immich database.
 
-This helps reclaim disk space by identifying files that Immich doesn't know about, such as leftover imports, sidecar files, or extension-case duplicates.
+This helps reclaim disk space by identifying files that Immich doesn't know about, such as leftover imports, sidecar files, orphaned thumbnails, or stale encoded videos.
 
 ## Features
 
 - Zero external dependencies -- uses only Go standard library
-- Automatic user detection via API key -- scans only your library
-- Automatically excludes Immich-internal directories (`thumbs/`, `encoded-video/`, `backups/`, `profile/`)
+- **Admin mode auto-detection** -- with an admin API key, scans all users and all directories; with a regular key, falls back to single-user mode
+- **Full-scope scanning** -- checks `library/`, `upload/`, `thumbs/`, `encoded-video/`, and `profile/` directories
+- **Directory-aware matching** -- uses the right strategy per directory type (path match, UUID match, or user ID match)
 - Strips Docker-internal path prefixes (`/data/` by default) so disk paths match API paths
 - Dry-run by default -- shows what would be moved without touching anything
 - Preserves directory structure when relocating files
@@ -101,11 +102,34 @@ immich-stray-finder [flags]
 
 ## How It Works
 
-1. **Identifies the current user** by calling `GET /api/users/me` with the provided API key, extracting the `storageLabel` to determine the user's library directory.
-2. **Fetches all asset paths from Immich** by paginating through `POST /api/search/metadata`, collecting every `originalPath` into a set for O(1) lookup. The Docker-internal path prefix (default `/data/`) is stripped so paths are relative to `--library-path`.
-3. **Scans the user's library directory** (`library/{storageLabel}/`) under `--library-path` using `filepath.WalkDir`, producing relative paths normalized to forward slashes. Immich-internal directories (`thumbs/`, `encoded-video/`, `backups/`, `profile/`) are automatically skipped.
-4. **Finds untracked files** -- any file on disk whose path is not in the Immich asset set is untracked.
-5. **Reports or moves** -- in dry-run mode (default), prints the list of untracked files. With `--move`, relocates them to `--target-dir` preserving the directory structure.
+### Admin Mode Auto-Detection
+
+On startup, the tool calls `GET /api/admin/users`. If the API key has admin privileges, it activates **admin mode** which scans all users and all directory types. If the call returns 403, it falls back to **single-user mode** (original behavior).
+
+| Mode | Scope | Directories scanned |
+|------|-------|-------------------|
+| Admin | All users | `library/`, `upload/`, `thumbs/`, `encoded-video/`, `profile/` |
+| Single-user | Current user only | `library/{storageLabel}/` only |
+
+### Matching Strategies
+
+Different directories use different strategies to determine whether a file is tracked:
+
+| Directory | Strategy | How it works |
+|-----------|----------|-------------|
+| `library/`, `upload/` | Exact path match | File's relative path must exist in the set of `originalPath` values from the API |
+| `thumbs/`, `encoded-video/` | Asset UUID match | The filename starts with an asset UUID (e.g., `{uuid}-thumbnail.webp`); that UUID is checked against all known asset IDs |
+| `profile/` | User UUID match | The 2nd path segment is a user UUID (e.g., `profile/{userId}/...`); that UUID is checked against all known user IDs |
+| `backups/` | Skipped | Contains system-managed database dumps, always excluded from scanning |
+| `.immich` | Always known | Immich marker files are never flagged |
+
+### Pipeline
+
+1. **Auto-detect mode** by calling the admin users endpoint.
+2. **Fetch assets** -- in admin mode, iterates per user with the `ownerId` filter; in single-user mode, searches without a filter.
+3. **Scan the filesystem** -- admin mode scans the entire `--library-path`; single-user mode scans only `library/{storageLabel}/`.
+4. **Match files** using directory-aware strategies.
+5. **Report or move** -- in dry-run mode (default), prints untracked files. With `--move`, relocates them preserving directory structure.
 
 ### Path Matching
 
@@ -122,7 +146,7 @@ The tool automatically handles the path translation between Immich's Docker-inte
 go test ./...
 ```
 
-There are unit tests across all packages covering the HTTP client (with mock servers), filesystem scanner (including directory exclusion), matching algorithm, and file mover (both dry-run and actual moves).
+There are unit tests across all packages covering the HTTP client (with mock servers), filesystem scanner (including directory exclusion), matching algorithm (all directory strategies), and file mover (both dry-run and actual moves).
 
 ## AI-Generated Code
 

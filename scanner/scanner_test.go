@@ -87,30 +87,47 @@ func TestScanFiles_ContextCancelled(t *testing.T) {
 	}
 }
 
-func TestScanFiles_ExcludesImmichDirs(t *testing.T) {
+func TestScanFiles_ExcludesBackupsOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create files in excluded directories.
-	excludedDirs := []string{"thumbs", "encoded-video", "backups", "profile"}
-	for _, d := range excludedDirs {
-		os.MkdirAll(filepath.Join(tmpDir, d, "sub"), 0o755)
-		os.WriteFile(filepath.Join(tmpDir, d, "sub", "file.dat"), []byte("test"), 0o644)
+	// Create files in various directories.
+	dirsAndFiles := map[string]string{
+		"backups/sub":       "dump.sql",       // excluded
+		"thumbs/user-1":     "thumb.webp",     // NOT excluded (now scanned)
+		"encoded-video/u-1": "video.mp4",      // NOT excluded (now scanned)
+		"profile/user-1":    "profile.jpg",    // NOT excluded (now scanned)
+		"upload/library":    "photo.jpg",       // NOT excluded
 	}
-
-	// Create a file in a non-excluded directory.
-	os.MkdirAll(filepath.Join(tmpDir, "upload", "library"), 0o755)
-	os.WriteFile(filepath.Join(tmpDir, "upload", "library", "photo.jpg"), []byte("test"), 0o644)
+	for dir, file := range dirsAndFiles {
+		os.MkdirAll(filepath.Join(tmpDir, dir), 0o755)
+		os.WriteFile(filepath.Join(tmpDir, dir, file), []byte("test"), 0o644)
+	}
 
 	result, err := ScanFiles(context.Background(), tmpDir, testLogger())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result) != 1 {
-		t.Fatalf("expected 1 file, got %d: %v", len(result), result)
+	sort.Strings(result)
+
+	// Should include thumbs, encoded-video, profile, and upload files.
+	// Only backups should be excluded.
+	expected := []string{
+		"encoded-video/u-1/video.mp4",
+		"profile/user-1/profile.jpg",
+		"thumbs/user-1/thumb.webp",
+		"upload/library/photo.jpg",
 	}
-	if result[0] != "upload/library/photo.jpg" {
-		t.Errorf("expected %q, got %q", "upload/library/photo.jpg", result[0])
+	sort.Strings(expected)
+
+	if len(result) != len(expected) {
+		t.Fatalf("expected %d files, got %d: %v", len(expected), len(result), result)
+	}
+
+	for i, e := range expected {
+		if result[i] != e {
+			t.Errorf("file %d: expected %q, got %q", i, e, result[i])
+		}
 	}
 }
 

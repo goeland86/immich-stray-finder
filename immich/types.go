@@ -2,9 +2,10 @@ package immich
 
 // SearchMetadataRequest is the body for POST /api/search/metadata.
 type SearchMetadataRequest struct {
-	Page    int `json:"page"`
-	Size    int `json:"size"`
-	WithExif bool `json:"withExif,omitempty"`
+	Page    int    `json:"page"`
+	Size    int    `json:"size"`
+	OwnerID string `json:"ownerId,omitempty"`
+	WithExif bool  `json:"withExif,omitempty"`
 }
 
 // SearchMetadataResponse wraps the paginated response from the search endpoint.
@@ -22,15 +23,26 @@ type SearchAssets struct {
 
 // Asset represents a single asset returned by the Immich API.
 type Asset struct {
-	ID           string `json:"id"`
-	OriginalPath string `json:"originalPath"`
+	ID               string `json:"id"`
+	OwnerID          string `json:"ownerId"`
+	OriginalPath     string `json:"originalPath"`
 	OriginalFileName string `json:"originalFileName"`
-	Type         string `json:"type"`
+	Type             string `json:"type"`
 }
 
-// User represents the current user returned by GET /api/users/me.
+// User represents a user returned by the Immich API.
 type User struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	StorageLabel string `json:"storageLabel"`
+}
+
+// AllAssetsResult bundles the three sets needed for directory-aware matching.
+type AllAssetsResult struct {
+	// AssetPaths contains all originalPath values from Immich assets.
+	AssetPaths map[string]struct{}
+	// AssetIDs contains all asset UUIDs.
+	AssetIDs map[string]struct{}
+	// UserIDs contains all known user UUIDs.
+	UserIDs map[string]struct{}
 }

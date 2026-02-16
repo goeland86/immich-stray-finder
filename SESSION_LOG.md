@@ -185,3 +185,68 @@ Built binaries for three platforms and published as a GitHub release:
 - `go vet ./...` -- no issues
 - All three binaries verified with `file` command
 - Release published at v1.0.0 with all artifacts
+
+---
+
+## Session 4 - Full-Scope Multi-User Stray Detection
+
+### Goal
+
+Expand from scanning only the authenticated user's `library/{storageLabel}/` directory to finding **any** file on disk that Immich doesn't know about, across all users and all directory types (thumbnails, encoded video, profile pictures).
+
+### Changes Made
+
+#### 1. Admin auto-detection (`immich/client.go`)
+
+Added `FetchAllUsers(ctx)` method calling `GET /api/admin/users`. Returns `ErrNotAdmin` sentinel on 403, enabling graceful fallback to single-user mode.
+
+#### 2. Multi-user asset fetching (`immich/types.go`, `immich/client.go`)
+
+- Added `OwnerID` field to `Asset` and `SearchMetadataRequest` structs
+- Added `AllAssetsResult` struct bundling three sets: `AssetPaths`, `AssetIDs`, `UserIDs`
+- Replaced `FetchAllAssetPaths` with `FetchAllAssets(ctx, userIDs)`:
+  - Admin mode: iterates per user with `ownerId` filter, merging results
+  - Single-user mode: searches without filter
+  - Collects `originalPath`, asset `ID`, and `OwnerID` into the three maps
+
+#### 3. Expanded scanner (`scanner/scanner.go`)
+
+Reduced `excludeDirs` from `{thumbs, encoded-video, backups, profile}` to just `{backups}`. The other directories are now scanned and matched by UUID.
+
+#### 4. Directory-aware matcher (`matcher/matcher.go`)
+
+Added `MatchContext` struct and rewrote `FindUntracked` to dispatch by top-level directory:
+- `library/`, `upload/` → exact path match against `AssetPaths`
+- `thumbs/`, `encoded-video/` → extract UUID from filename, check against `AssetIDs`
+- `profile/` → extract user UUID from path, check against `UserIDs`
+- `.immich` → always known
+- Unknown directories → flagged as untracked
+
+Added helpers: `matchByAssetID`, `matchByUserID`, `extractUUID`, `isValidUUID`.
+
+#### 5. Rewired orchestration (`main.go`)
+
+New flow:
+1. Try `FetchAllUsers` → admin mode if ok, single-user if `ErrNotAdmin`
+2. Admin: fetch assets per user, scan entire `--library-path`
+3. Single-user: fetch current user, scan `library/{storageLabel}/` only
+4. Build `MatchContext`, call `FindUntracked`, report/move
+
+Extracted `reportAndMove` helper to avoid duplicating the output logic.
+
+#### 6. Updated tests
+
+- `immich/client_test.go`: Renamed `TestFetchAllAssetPaths_*` to `TestFetchAllAssets_*`, added `TestFetchAllUsers_Success`, `TestFetchAllUsers_NotAdmin`, `TestFetchAllAssets_MultiUser`
+- `scanner/scanner_test.go`: Updated `TestScanFiles_ExcludesImmichDirs` → `TestScanFiles_ExcludesBackupsOnly`, verifies thumbs/encoded-video/profile are now scanned
+- `matcher/matcher_test.go`: Replaced 4 tests with 14 tests covering all matching strategies (library, upload, thumbs, encoded-video, profile, .immich, unknown dirs, mixed, empty inputs, UUID extraction/validation)
+
+#### 7. Updated documentation
+
+- `README.md`: Documented admin mode, matching strategies table, expanded pipeline description
+- `SESSION_LOG.md`: Added this session entry
+
+### Verification
+
+- `go vet ./...` -- no issues
+- `go test ./...` -- all tests pass (immich, matcher, mover, scanner)
+- `GOOS=linux GOARCH=amd64 go build` -- cross-compiles successfully

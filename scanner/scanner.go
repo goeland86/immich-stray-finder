@@ -8,20 +8,17 @@ import (
 	"strings"
 )
 
-// excludeDirs are Immich-internal directories that should be skipped during
-// scanning. These contain generated thumbnails, transcoded video, backups, and
-// profile data — none of which appear in the asset originalPath list.
+// excludeDirs are directories that should be skipped during scanning.
+// Only backups/ is excluded because it contains system-managed DB dumps that
+// are never tracked as assets. All other Immich directories (thumbs/,
+// encoded-video/, profile/) are now scanned and matched by UUID.
 var excludeDirs = map[string]struct{}{
-	"thumbs":        {},
-	"encoded-video": {},
-	"backups":       {},
-	"profile":       {},
+	"backups": {},
 }
 
 // ScanFiles walks libraryPath and returns all file paths relative to it,
 // using forward slashes to match Immich's originalPath format.
-// Immich-internal directories (thumbs, encoded-video, backups, profile) are
-// automatically excluded.
+// The backups/ directory is automatically excluded.
 func ScanFiles(ctx context.Context, libraryPath string, logger *slog.Logger) ([]string, error) {
 	var files []string
 

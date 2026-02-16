@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,9 @@ import (
 )
 
 const defaultPageSize = 1000
+
+// ErrNotAdmin is returned when the API key does not have admin privileges.
+var ErrNotAdmin = errors.New("API key does not have admin privileges")
 
 // Client communicates with the Immich API.
 type Client struct {
@@ -64,65 +68,143 @@ func (c *Client) FetchCurrentUser(ctx context.Context) (*User, error) {
 	return &user, nil
 }
 
-// FetchAllAssetPaths returns a set of all originalPath values known to Immich.
-func (c *Client) FetchAllAssetPaths(ctx context.Context) (map[string]struct{}, error) {
-	paths := make(map[string]struct{})
-	page := 1
+// FetchAllUsers returns all users from the admin API.
+// Returns ErrNotAdmin if the API key lacks admin privileges (403).
+func (c *Client) FetchAllUsers(ctx context.Context) ([]User, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/admin/users", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("x-api-key", c.apiKey)
 
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, ErrNotAdmin
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var users []User
+	if err := json.Unmarshal(body, &users); err != nil {
+		return nil, fmt.Errorf("unmarshal users: %w", err)
+	}
+
+	c.logger.Info("fetched admin user list", "user_count", len(users))
+	return users, nil
+}
+
+// FetchAllAssets collects all asset data needed for directory-aware matching.
+//
+// If userIDs is non-empty (admin mode), it iterates per user with the ownerId
+// filter to collect assets across all users. If userIDs is empty (single-user
+// mode), it searches without an ownerId filter.
+func (c *Client) FetchAllAssets(ctx context.Context, userIDs []string) (*AllAssetsResult, error) {
+	result := &AllAssetsResult{
+		AssetPaths: make(map[string]struct{}),
+		AssetIDs:   make(map[string]struct{}),
+		UserIDs:    make(map[string]struct{}),
+	}
+
+	if len(userIDs) == 0 {
+		// Single-user mode: search without ownerId filter.
+		if err := c.fetchAssetsPage(ctx, "", result); err != nil {
+			return nil, err
+		}
+	} else {
+		// Admin mode: iterate per user.
+		for _, uid := range userIDs {
+			c.logger.Info("fetching assets for user", "user_id", uid)
+			if err := c.fetchAssetsPage(ctx, uid, result); err != nil {
+				return nil, fmt.Errorf("fetch assets for user %s: %w", uid, err)
+			}
+		}
+	}
+
+	c.logger.Info("finished fetching assets from Immich",
+		"total_paths", len(result.AssetPaths),
+		"total_asset_ids", len(result.AssetIDs),
+		"total_user_ids", len(result.UserIDs),
+	)
+	return result, nil
+}
+
+// fetchAssetsPage paginates through the search endpoint, optionally filtering
+// by ownerID, and merges results into the provided AllAssetsResult.
+func (c *Client) fetchAssetsPage(ctx context.Context, ownerID string, result *AllAssetsResult) error {
+	page := 1
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 
 		reqBody := SearchMetadataRequest{
-			Page: page,
-			Size: defaultPageSize,
+			Page:    page,
+			Size:    defaultPageSize,
+			OwnerID: ownerID,
 		}
 
 		body, err := json.Marshal(reqBody)
 		if err != nil {
-			return nil, fmt.Errorf("marshal request: %w", err)
+			return fmt.Errorf("marshal request: %w", err)
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 			c.baseURL+"/api/search/metadata", bytes.NewReader(body))
 		if err != nil {
-			return nil, fmt.Errorf("create request: %w", err)
+			return fmt.Errorf("create request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("x-api-key", c.apiKey)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("http request page %d: %w", page, err)
+			return fmt.Errorf("http request page %d: %w", page, err)
 		}
 
 		respBody, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			return nil, fmt.Errorf("read response page %d: %w", page, err)
+			return fmt.Errorf("read response page %d: %w", page, err)
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("API returned status %d on page %d: %s",
+			return fmt.Errorf("API returned status %d on page %d: %s",
 				resp.StatusCode, page, string(respBody))
 		}
 
 		var searchResp SearchMetadataResponse
 		if err := json.Unmarshal(respBody, &searchResp); err != nil {
-			return nil, fmt.Errorf("unmarshal response page %d: %w", page, err)
+			return fmt.Errorf("unmarshal response page %d: %w", page, err)
 		}
 
 		for _, asset := range searchResp.Assets.Items {
 			if asset.OriginalPath != "" {
-				paths[asset.OriginalPath] = struct{}{}
+				result.AssetPaths[asset.OriginalPath] = struct{}{}
+			}
+			if asset.ID != "" {
+				result.AssetIDs[asset.ID] = struct{}{}
+			}
+			if asset.OwnerID != "" {
+				result.UserIDs[asset.OwnerID] = struct{}{}
 			}
 		}
 
 		c.logger.Debug("fetched asset page",
 			"page", page,
+			"owner_id", ownerID,
 			"count", searchResp.Assets.Count,
-			"total_so_far", len(paths),
+			"total_paths_so_far", len(result.AssetPaths),
 		)
 
 		if searchResp.Assets.NextPage == nil || searchResp.Assets.Count == 0 {
@@ -130,11 +212,10 @@ func (c *Client) FetchAllAssetPaths(ctx context.Context) (map[string]struct{}, e
 		}
 		nextPage, err := strconv.Atoi(*searchResp.Assets.NextPage)
 		if err != nil {
-			return nil, fmt.Errorf("parse nextPage %q: %w", *searchResp.Assets.NextPage, err)
+			return fmt.Errorf("parse nextPage %q: %w", *searchResp.Assets.NextPage, err)
 		}
 		page = nextPage
 	}
 
-	c.logger.Info("finished fetching assets from Immich", "total_assets", len(paths))
-	return paths, nil
+	return nil
 }
