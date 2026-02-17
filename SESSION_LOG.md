@@ -250,3 +250,84 @@ Extracted `reportAndMove` helper to avoid duplicating the output logic.
 - `go vet ./...` -- no issues
 - `go test ./...` -- all tests pass (immich, matcher, mover, scanner)
 - `GOOS=linux GOARCH=amd64 go build` -- cross-compiles successfully
+
+---
+
+## Session 5 - Fix Admin Mode Asset Fetching & Matcher Bugs
+
+### Goal
+
+Fix three bugs discovered during live testing against Immich v2.5.6 on the bpi-r4 (ARM64). The tool was reporting 397 false positives out of 903 files scanned, when only 13 true strays existed.
+
+### Bugs Found
+
+1. **`.immich` marker files flagged as untracked** -- The matcher checked if the *top-level directory* equaled `.immich`, but marker files appear as `library/.immich`, `thumbs/.immich`, etc. where the top-level dir is `library`/`thumbs`.
+2. **Admin mode returned only admin's own assets** -- The Immich v2 `POST /api/search/metadata` endpoint has no `ownerId` field and is always scoped to the calling user. The `SearchMetadataRequest.OwnerID` field was silently ignored. Result: 253 of 295 assets found, all belonging to admin.
+3. **User IDs not fully populated** -- `total_user_ids=1` despite 3 users, because only asset owners appeared in the result set (and only admin's assets were returned).
+
+### Changes Made
+
+#### 1. Fix `.immich` marker detection (`matcher/matcher.go`)
+
+Added `path.Base(relPath) == ".immich"` check at the top of `isKnown()` before the directory switch. Removed the now-redundant `case ".immich"` from the switch statement. This correctly handles `.immich` files in any subdirectory.
+
+#### 2. Remove dead `OwnerID` code (`immich/types.go`, `immich/client.go`)
+
+- Removed `OwnerID` field from `SearchMetadataRequest` (Immich v2 API doesn't support it)
+- Simplified `FetchAllAssets()`: removed `userIDs` parameter and per-user iteration loop
+- Simplified `fetchAssetsPage()`: removed `ownerID` parameter and related logging
+
+#### 3. Add PostgreSQL direct query for admin mode (`immich/db.go`, `main.go`)
+
+The Immich v2 API cannot fetch other users' assets. Added direct PostgreSQL access as the reliable solution:
+
+- **New file `immich/db.go`**: `FetchAllAssetsFromDB(ctx, dbURL)` queries `SELECT id, "ownerId", "originalPath" FROM asset WHERE "deletedAt" IS NULL AND status = 'active'` using `github.com/jackc/pgx/v5`
+- **New file `immich/db_test.go`**: Tests for bad URL and cancelled context
+- **`main.go`**: Added `--db-url` flag. New flow:
+  - Admin key + `--db-url` → query PostgreSQL for all assets across all users
+  - Admin key without `--db-url` → log warning, fall back to single-user scan
+  - Non-admin key → single-user mode via API (unchanged)
+- Added `redactDBURL()` helper to mask passwords in log output
+
+#### 4. Updated tests (`immich/client_test.go`, `matcher/matcher_test.go`)
+
+- Updated all `FetchAllAssets` call sites (removed second argument)
+- Replaced `TestFetchAllAssets_MultiUser` (which relied on non-functional `OwnerID` filtering) with `TestFetchAllAssets_CollectsMultipleOwners`
+- Added `TestFindUntracked_ImmichMarkerInSubdirectories` covering `library/.immich`, `thumbs/.immich`, etc.
+
+#### 5. Added dependency
+
+- `go.mod`/`go.sum`: Added `github.com/jackc/pgx/v5 v5.8.0` (first external dependency)
+
+### Live Testing on bpi-r4
+
+Deployed to bpi-r4 (BananaPi R4, ARM64) running Immich v2.5.6 with 3 users and 295 assets across 903 files on disk:
+
+```
+/tmp/immich-stray-finder \
+  --immich-url http://localhost:2283 \
+  --api-key <admin-key> \
+  --library-path /srv/immich-app/library \
+  --path-prefix /data/ \
+  --db-url postgres://postgres:<pass>@172.20.2.11:5432/immich \
+  --verbose
+```
+
+Results:
+- 3 users discovered (jon/admin, Alice, Bob)
+- 295 asset paths fetched from PostgreSQL (previously 253 via API)
+- 903 files scanned
+- **13 untracked files found** (exactly the planted strays, down from 397 false positives)
+
+The 13 strays span all directory types: library orphans (admin + Alice), orphaned uploads, stray thumbnails, stray encoded video, and a fake profile.
+
+### Bug discovered during deployment
+
+The plan referenced the table name `assets` (plural) but Immich v2.5.6 uses `asset` (singular). Fixed before the successful test run.
+
+### Verification
+
+- `go vet ./...` -- no issues
+- `go test ./...` -- all tests pass
+- `GOOS=linux GOARCH=arm64 go build` -- cross-compiles successfully
+- Live test on bpi-r4 -- 13/13 expected strays found, 0 false positives
