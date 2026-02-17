@@ -46,7 +46,7 @@ func TestFetchAllAssets_SinglePage(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-key", testLogger())
-	result, err := client.FetchAllAssets(context.Background(), nil)
+	result, err := client.FetchAllAssets(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestFetchAllAssets_MultiPage(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-key", testLogger())
-	result, err := client.FetchAllAssets(context.Background(), nil)
+	result, err := client.FetchAllAssets(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestFetchAllAssets_APIError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "bad-key", testLogger())
-	_, err := client.FetchAllAssets(context.Background(), nil)
+	_, err := client.FetchAllAssets(context.Background())
 	if err == nil {
 		t.Fatal("expected error for 401 response")
 	}
@@ -153,7 +153,7 @@ func TestFetchAllAssets_ContextCancelled(t *testing.T) {
 	cancel() // cancel immediately
 
 	client := NewClient(server.URL, "key", testLogger())
-	_, err := client.FetchAllAssets(ctx, nil)
+	_, err := client.FetchAllAssets(ctx)
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -213,38 +213,21 @@ func TestFetchAllUsers_NotAdmin(t *testing.T) {
 	}
 }
 
-func TestFetchAllAssets_MultiUser(t *testing.T) {
+func TestFetchAllAssets_CollectsMultipleOwners(t *testing.T) {
+	// The API returns assets from the calling user only, but the response
+	// may contain different ownerIDs. Verify they are all collected.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req SearchMetadataRequest
-		json.NewDecoder(r.Body).Decode(&req)
-
-		var resp SearchMetadataResponse
-		switch req.OwnerID {
-		case "user-1":
-			resp = SearchMetadataResponse{
-				Assets: SearchAssets{
-					Total: 2,
-					Count: 2,
-					Items: []Asset{
-						{ID: "asset-1a", OwnerID: "user-1", OriginalPath: "/data/library/alice/photo1.jpg"},
-						{ID: "asset-1b", OwnerID: "user-1", OriginalPath: "/data/library/alice/photo2.jpg"},
-					},
-					NextPage: nil,
+		resp := SearchMetadataResponse{
+			Assets: SearchAssets{
+				Total: 3,
+				Count: 3,
+				Items: []Asset{
+					{ID: "asset-1a", OwnerID: "user-1", OriginalPath: "/data/library/alice/photo1.jpg"},
+					{ID: "asset-1b", OwnerID: "user-1", OriginalPath: "/data/library/alice/photo2.jpg"},
+					{ID: "asset-2a", OwnerID: "user-2", OriginalPath: "/data/library/bob/photo1.jpg"},
 				},
-			}
-		case "user-2":
-			resp = SearchMetadataResponse{
-				Assets: SearchAssets{
-					Total: 1,
-					Count: 1,
-					Items: []Asset{
-						{ID: "asset-2a", OwnerID: "user-2", OriginalPath: "/data/library/bob/photo1.jpg"},
-					},
-					NextPage: nil,
-				},
-			}
-		default:
-			t.Errorf("unexpected ownerId: %s", req.OwnerID)
+				NextPage: nil,
+			},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
@@ -252,20 +235,17 @@ func TestFetchAllAssets_MultiUser(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "admin-key", testLogger())
-	result, err := client.FetchAllAssets(context.Background(), []string{"user-1", "user-2"})
+	result, err := client.FetchAllAssets(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// 3 total paths across both users.
 	if len(result.AssetPaths) != 3 {
 		t.Errorf("expected 3 paths, got %d", len(result.AssetPaths))
 	}
-	// 3 total asset IDs.
 	if len(result.AssetIDs) != 3 {
 		t.Errorf("expected 3 asset IDs, got %d", len(result.AssetIDs))
 	}
-	// 2 distinct user IDs.
 	if len(result.UserIDs) != 2 {
 		t.Errorf("expected 2 user IDs, got %d", len(result.UserIDs))
 	}
@@ -274,8 +254,5 @@ func TestFetchAllAssets_MultiUser(t *testing.T) {
 	}
 	if _, ok := result.AssetPaths["/data/library/bob/photo1.jpg"]; !ok {
 		t.Error("missing bob/photo1.jpg")
-	}
-	if _, ok := result.AssetIDs["asset-2a"]; !ok {
-		t.Error("missing asset-2a")
 	}
 }

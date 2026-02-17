@@ -48,6 +48,12 @@ func FindUntracked(diskFiles []string, mctx *MatchContext, logger *slog.Logger) 
 // isKnown dispatches by top-level directory to determine whether a file is
 // tracked by Immich.
 func isKnown(relPath string, mctx *MatchContext) bool {
+	// .immich marker files can appear in any directory (library/.immich,
+	// thumbs/.immich, etc.) and are always considered known.
+	if path.Base(relPath) == ".immich" {
+		return true
+	}
+
 	topDir := strings.SplitN(relPath, "/", 2)[0]
 
 	switch topDir {
@@ -63,10 +69,6 @@ func isKnown(relPath string, mctx *MatchContext) bool {
 	case "profile":
 		// Extract user UUID from path.
 		return matchByUserID(relPath, mctx.UserIDs)
-
-	case ".immich":
-		// Immich marker files are always considered known.
-		return true
 
 	default:
 		// Unknown top-level directories are flagged as untracked.

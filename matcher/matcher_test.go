@@ -159,6 +159,23 @@ func TestFindUntracked_ImmichMarkerAlwaysKnown(t *testing.T) {
 	}
 }
 
+func TestFindUntracked_ImmichMarkerInSubdirectories(t *testing.T) {
+	mctx := newMatchContext()
+
+	diskFiles := []string{
+		"library/.immich",
+		"thumbs/.immich",
+		"encoded-video/.immich",
+		"upload/.immich",
+		"profile/.immich",
+	}
+
+	untracked := FindUntracked(diskFiles, mctx, testLogger())
+	if len(untracked) != 0 {
+		t.Errorf("expected all .immich markers to be known, got %d untracked: %v", len(untracked), untracked)
+	}
+}
+
 func TestFindUntracked_UnknownTopLevelDir(t *testing.T) {
 	mctx := newMatchContext()
 

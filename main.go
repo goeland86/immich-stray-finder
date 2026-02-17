@@ -23,6 +23,7 @@ func main() {
 	libraryPath := flag.String("library-path", "", "Immich storage root on disk (parent of upload/)")
 	pathPrefix := flag.String("path-prefix", "/data/", "Prefix to strip from Immich originalPath values to make them relative to library-path")
 	targetDir := flag.String("target-dir", "./immich-orphans", "Directory to move orphan files to")
+	dbURL := flag.String("db-url", "", "PostgreSQL connection URL for admin mode (e.g., postgres://user:pass@host:5432/immich)")
 	move := flag.Bool("move", false, "Actually move files (dry-run by default)")
 	verbose := flag.Bool("verbose", false, "Enable debug logging")
 	flag.Parse()
@@ -46,18 +47,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := run(ctx, logger, *immichURL, *apiKey, *libraryPath, *pathPrefix, *targetDir, *move); err != nil {
+	if err := run(ctx, logger, *immichURL, *apiKey, *libraryPath, *pathPrefix, *targetDir, *dbURL, *move); err != nil {
 		logger.Error("fatal error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, logger *slog.Logger, immichURL, apiKey, libraryPath, pathPrefix, targetDir string, doMove bool) error {
+func run(ctx context.Context, logger *slog.Logger, immichURL, apiKey, libraryPath, pathPrefix, targetDir, dbURL string, doMove bool) error {
 	client := immich.NewClient(immichURL, apiKey, logger)
 
 	// Step 1: Detect admin mode by trying the admin users endpoint.
 	adminMode := false
-	var userIDs []string
 	var allUserIDs map[string]struct{}
 
 	users, err := client.FetchAllUsers(ctx)
@@ -65,9 +65,7 @@ func run(ctx context.Context, logger *slog.Logger, immichURL, apiKey, libraryPat
 		// Admin mode: we have the full user list.
 		adminMode = true
 		allUserIDs = make(map[string]struct{}, len(users))
-		userIDs = make([]string, len(users))
-		for i, u := range users {
-			userIDs[i] = u.ID
+		for _, u := range users {
 			allUserIDs[u.ID] = struct{}{}
 			logger.Info("discovered user", "name", u.Name, "id", u.ID, "storage_label", u.StorageLabel)
 		}
@@ -81,17 +79,26 @@ func run(ctx context.Context, logger *slog.Logger, immichURL, apiKey, libraryPat
 
 	// Step 2: Fetch assets.
 	var result *immich.AllAssetsResult
-	if adminMode {
-		logger.Info("fetching assets for all users", "url", immichURL)
-		result, err = client.FetchAllAssets(ctx, userIDs)
+
+	if adminMode && dbURL != "" {
+		// Admin mode with direct DB access: query PostgreSQL for all users' assets.
+		logger.Info("fetching all assets from database", "db", redactDBURL(dbURL))
+		result, err = immich.FetchAllAssetsFromDB(ctx, dbURL)
 		if err != nil {
-			return fmt.Errorf("fetch assets: %w", err)
+			return fmt.Errorf("fetch assets from database: %w", err)
 		}
 		// Merge user IDs from the admin user list (in case some users have no assets).
 		for uid := range allUserIDs {
 			result.UserIDs[uid] = struct{}{}
 		}
 	} else {
+		if adminMode {
+			// Admin key detected but no --db-url: warn and fall back to single-user scan.
+			logger.Warn("admin API key detected but --db-url not provided; the Immich v2 search API " +
+				"cannot fetch other users' assets. Falling back to single-user scan (admin's assets only). " +
+				"Provide --db-url for full multi-user stray detection.")
+		}
+
 		// Single-user mode: identify the current user.
 		user, err := client.FetchCurrentUser(ctx)
 		if err != nil {
@@ -102,7 +109,7 @@ func run(ctx context.Context, logger *slog.Logger, immichURL, apiKey, libraryPat
 		}
 
 		logger.Info("fetching asset paths from Immich", "url", immichURL)
-		result, err = client.FetchAllAssets(ctx, nil)
+		result, err = client.FetchAllAssets(ctx)
 		if err != nil {
 			return fmt.Errorf("fetch assets: %w", err)
 		}
@@ -144,7 +151,7 @@ func run(ctx context.Context, logger *slog.Logger, immichURL, apiKey, libraryPat
 		return reportAndMove(untracked, libraryPath, targetDir, doMove, logger)
 	}
 
-	// Admin mode: scan the entire library-path root.
+	// Admin mode with DB: scan the entire library-path root.
 	// Strip the path prefix from asset paths.
 	strippedPaths := make(map[string]struct{}, len(result.AssetPaths))
 	for p := range result.AssetPaths {
@@ -169,6 +176,21 @@ func run(ctx context.Context, logger *slog.Logger, immichURL, apiKey, libraryPat
 	logger.Info("matching files against Immich database")
 	untracked := matcher.FindUntracked(diskFiles, mctx, logger)
 	return reportAndMove(untracked, libraryPath, targetDir, doMove, logger)
+}
+
+// redactDBURL masks the password in a PostgreSQL connection URL for logging.
+func redactDBURL(dbURL string) string {
+	// postgres://user:password@host:port/db → postgres://user:***@host:port/db
+	atIdx := strings.Index(dbURL, "@")
+	if atIdx == -1 {
+		return dbURL
+	}
+	prefix := dbURL[:atIdx]
+	colonIdx := strings.LastIndex(prefix, ":")
+	if colonIdx == -1 {
+		return dbURL
+	}
+	return prefix[:colonIdx+1] + "***" + dbURL[atIdx:]
 }
 
 func reportAndMove(untracked []matcher.UntrackedFile, libraryPath, targetDir string, doMove bool, logger *slog.Logger) error {

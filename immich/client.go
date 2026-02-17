@@ -105,30 +105,18 @@ func (c *Client) FetchAllUsers(ctx context.Context) ([]User, error) {
 }
 
 // FetchAllAssets collects all asset data needed for directory-aware matching.
-//
-// If userIDs is non-empty (admin mode), it iterates per user with the ownerId
-// filter to collect assets across all users. If userIDs is empty (single-user
-// mode), it searches without an ownerId filter.
-func (c *Client) FetchAllAssets(ctx context.Context, userIDs []string) (*AllAssetsResult, error) {
+// The Immich v2 search/metadata API is always scoped to the calling user's
+// assets — there is no ownerId filter. This method paginates through all
+// results available to the current API key.
+func (c *Client) FetchAllAssets(ctx context.Context) (*AllAssetsResult, error) {
 	result := &AllAssetsResult{
 		AssetPaths: make(map[string]struct{}),
 		AssetIDs:   make(map[string]struct{}),
 		UserIDs:    make(map[string]struct{}),
 	}
 
-	if len(userIDs) == 0 {
-		// Single-user mode: search without ownerId filter.
-		if err := c.fetchAssetsPage(ctx, "", result); err != nil {
-			return nil, err
-		}
-	} else {
-		// Admin mode: iterate per user.
-		for _, uid := range userIDs {
-			c.logger.Info("fetching assets for user", "user_id", uid)
-			if err := c.fetchAssetsPage(ctx, uid, result); err != nil {
-				return nil, fmt.Errorf("fetch assets for user %s: %w", uid, err)
-			}
-		}
+	if err := c.fetchAssetsPage(ctx, result); err != nil {
+		return nil, err
 	}
 
 	c.logger.Info("finished fetching assets from Immich",
@@ -139,9 +127,9 @@ func (c *Client) FetchAllAssets(ctx context.Context, userIDs []string) (*AllAsse
 	return result, nil
 }
 
-// fetchAssetsPage paginates through the search endpoint, optionally filtering
-// by ownerID, and merges results into the provided AllAssetsResult.
-func (c *Client) fetchAssetsPage(ctx context.Context, ownerID string, result *AllAssetsResult) error {
+// fetchAssetsPage paginates through the search endpoint and merges results
+// into the provided AllAssetsResult.
+func (c *Client) fetchAssetsPage(ctx context.Context, result *AllAssetsResult) error {
 	page := 1
 	for {
 		if err := ctx.Err(); err != nil {
@@ -149,9 +137,8 @@ func (c *Client) fetchAssetsPage(ctx context.Context, ownerID string, result *Al
 		}
 
 		reqBody := SearchMetadataRequest{
-			Page:    page,
-			Size:    defaultPageSize,
-			OwnerID: ownerID,
+			Page: page,
+			Size: defaultPageSize,
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -202,7 +189,6 @@ func (c *Client) fetchAssetsPage(ctx context.Context, ownerID string, result *Al
 
 		c.logger.Debug("fetched asset page",
 			"page", page,
-			"owner_id", ownerID,
 			"count", searchResp.Assets.Count,
 			"total_paths_so_far", len(result.AssetPaths),
 		)

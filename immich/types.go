@@ -1,11 +1,12 @@
 package immich
 
 // SearchMetadataRequest is the body for POST /api/search/metadata.
+// Note: Immich v2 API has no ownerId field — search is always scoped to the
+// calling user's assets.
 type SearchMetadataRequest struct {
-	Page    int    `json:"page"`
-	Size    int    `json:"size"`
-	OwnerID string `json:"ownerId,omitempty"`
-	WithExif bool  `json:"withExif,omitempty"`
+	Page     int  `json:"page"`
+	Size     int  `json:"size"`
+	WithExif bool `json:"withExif,omitempty"`
 }
 
 // SearchMetadataResponse wraps the paginated response from the search endpoint.
